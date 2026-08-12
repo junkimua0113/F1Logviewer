@@ -28,7 +28,9 @@ export const TrackMap: React.FC<TrackMapProps> = ({ baseLocationData, allLocatio
         l.duration_sector_1 && 
         l.duration_sector_2 && 
         l.duration_sector_3 &&
-        l.lap_duration
+        l.lap_duration &&
+        l.lap_duration > 50 &&
+        l.lap_duration < 200
       );
       
       if (validLaps.length > 0) {
@@ -149,11 +151,27 @@ export const TrackMap: React.FC<TrackMapProps> = ({ baseLocationData, allLocatio
       ctx.lineJoin = 'round';
       
       let isFirst = true;
+      let lastTime = 0;
+      
       for (let i = 0; i < points.length; i++) {
         const p = points[i];
-        if (p.x === 0 && p.y === 0) continue;
-        if (p.x < bounds.minX - bounds.width || p.x > bounds.maxX + bounds.width) continue;
-        if (p.y < bounds.minY - bounds.height || p.y > bounds.maxY + bounds.height) continue;
+        
+        // Skip anomalies and break the line
+        if (p.x === 0 && p.y === 0) {
+          isFirst = true;
+          continue;
+        }
+        if (p.x < bounds.minX - bounds.width || p.x > bounds.maxX + bounds.width ||
+            p.y < bounds.minY - bounds.height || p.y > bounds.maxY + bounds.height) {
+          isFirst = true;
+          continue;
+        }
+
+        const t = new Date(p.date).getTime();
+        // If data is missing for > 1500ms, break the line so it doesn't draw across the infield
+        if (!isFirst && (t - lastTime > 1500)) {
+          isFirst = true;
+        }
 
         if (isFirst) {
           ctx.moveTo(mapX(p.x), mapY(p.y));
@@ -161,6 +179,8 @@ export const TrackMap: React.FC<TrackMapProps> = ({ baseLocationData, allLocatio
         } else {
           ctx.lineTo(mapX(p.x), mapY(p.y));
         }
+        
+        lastTime = t;
       }
       ctx.stroke();
     };
@@ -277,6 +297,14 @@ function getInterpolatedLocation(locations: LocationData[], targetTime: number):
   const timeAfter = new Date(tAfter.date).getTime();
   
   if (timeAfter === timeBefore) return { x: tBefore.x, y: tBefore.y };
+  
+  // Prevent cars from slowly floating across the map during large data drops (e.g. >1 second)
+  if (timeAfter - timeBefore > 1000) {
+    const leftDiff = Math.abs(timeBefore - targetTime);
+    const rightDiff = Math.abs(timeAfter - targetTime);
+    const closest = leftDiff < rightDiff ? tBefore : tAfter;
+    return { x: closest.x, y: closest.y };
+  }
   
   const ratio = (targetTime - timeBefore) / (timeAfter - timeBefore);
   
