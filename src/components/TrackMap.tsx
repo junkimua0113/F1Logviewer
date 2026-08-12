@@ -5,12 +5,11 @@ interface TrackMapProps {
   baseLocationData: LocationData[];
   allLocations: Record<number, LocationData[]>;
   drivers: Driver[];
-  currentDate: string | undefined;
   smoothTimeMs?: number;
   laps: LapData[];
 }
 
-export const TrackMap: React.FC<TrackMapProps> = ({ baseLocationData, allLocations, drivers, currentDate, smoothTimeMs, laps }) => {
+export const TrackMap: React.FC<TrackMapProps> = ({ baseLocationData, allLocations, drivers, smoothTimeMs, laps }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   // Find the best valid lap across ALL drivers to draw the track map
@@ -216,7 +215,7 @@ export const TrackMap: React.FC<TrackMapProps> = ({ baseLocationData, allLocatio
     }
 
     // Draw current position for all drivers
-    const targetTime = smoothTimeMs !== undefined ? smoothTimeMs : (currentDate ? new Date(currentDate).getTime() : null);
+    const targetTime = smoothTimeMs !== undefined ? smoothTimeMs : null;
     
     if (targetTime !== null && drivers) {
       drivers.forEach(driver => {
@@ -247,7 +246,7 @@ export const TrackMap: React.FC<TrackMapProps> = ({ baseLocationData, allLocatio
       });
     }
 
-  }, [trackLocationData, allLocations, drivers, currentDate, smoothTimeMs, bounds, referenceLap]);
+  }, [trackLocationData, allLocations, drivers, smoothTimeMs, bounds, referenceLap]);
 
   return (
     <div className="canvas-container">

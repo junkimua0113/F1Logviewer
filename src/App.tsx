@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { getSessions, getDrivers, getCarData, getLocationData, getLaps } from './api/openf1'
 import type { Session, Driver, CarData, LocationData, LapData } from './api/openf1'
 import { TelemetryChart } from './components/TelemetryChart'
@@ -15,7 +15,7 @@ function App() {
   const [drivers, setDrivers] = useState<Driver[]>([])
   const [selectedDriver, setSelectedDriver] = useState<number | ''>('')
   
-  const [fractionalProgress, setFractionalProgress] = useState<number>(0)
+  const [smoothTimeMs, setSmoothTimeMs] = useState<number | undefined>(undefined)
 
   const [carData, setCarData] = useState<CarData[]>([])
   const [locationData, setLocationData] = useState<LocationData[]>([])
@@ -155,50 +155,54 @@ function App() {
   const driverColor = currentDriver ? `#${currentDriver.team_colour}` : '#e10600';
 
   const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setCurrentTimeIndex(parseInt(e.target.value, 10));
+    const newIdx = parseInt(e.target.value, 10);
+    setCurrentTimeIndex(newIdx);
+    if (!isPlaying && carData[newIdx]) {
+      setSmoothTimeMs(new Date(carData[newIdx].date).getTime());
+    }
   };
+
+  const playTimeMsRef = useRef<number>(0);
+  const lastTickRef = useRef<number>(0);
 
   useEffect(() => {
     let interval: ReturnType<typeof setInterval>;
     if (isPlaying && carData.length > 0) {
-      let accumulated = 0;
+      if (playTimeMsRef.current === 0) {
+        playTimeMsRef.current = new Date(carData[currentTimeIndex]?.date).getTime();
+      }
+      lastTickRef.current = performance.now();
+
       interval = setInterval(() => {
-        accumulated += (33 / 330) * playbackSpeed;
-        if (accumulated >= 1) {
-          const step = Math.floor(accumulated);
-          accumulated -= step;
-          setCurrentTimeIndex(prev => {
-            if (prev >= carData.length - 1) {
-              setIsPlaying(false);
-              return prev;
-            }
-            return Math.min(prev + step, carData.length - 1);
-          });
-        }
+        const now = performance.now();
+        const deltaMs = now - lastTickRef.current;
+        lastTickRef.current = now;
         
-        if (playbackSpeed === 1) {
-          setFractionalProgress(accumulated);
-        } else {
-          setFractionalProgress(0);
-        }
+        playTimeMsRef.current += deltaMs * playbackSpeed;
+        const currentTargetTime = playTimeMsRef.current;
+        
+        setSmoothTimeMs(currentTargetTime);
+        
+        setCurrentTimeIndex(prev => {
+          let i = prev;
+          while (i < carData.length - 1 && new Date(carData[i + 1].date).getTime() <= currentTargetTime) {
+            i++;
+          }
+          if (i >= carData.length - 1) {
+            setIsPlaying(false);
+            return carData.length - 1;
+          }
+          return i;
+        });
       }, 33);
     } else {
-      setFractionalProgress(0);
+      playTimeMsRef.current = 0;
+      if (carData[currentTimeIndex]) {
+        setSmoothTimeMs(new Date(carData[currentTimeIndex].date).getTime());
+      }
     }
     return () => clearInterval(interval);
-  }, [isPlaying, playbackSpeed, carData.length]);
-
-
-
-  // Compute smooth time for the map animation
-  const currentCarData = carData[currentTimeIndex];
-  const nextCarData = carData[Math.min(currentTimeIndex + 1, Math.max(0, carData.length - 1))];
-  
-  let smoothTimeMs = currentCarData ? new Date(currentCarData.date).getTime() : undefined;
-  if (smoothTimeMs && nextCarData && fractionalProgress > 0) {
-    const t2 = new Date(nextCarData.date).getTime();
-    smoothTimeMs = smoothTimeMs + (t2 - smoothTimeMs) * fractionalProgress;
-  }
+  }, [isPlaying, playbackSpeed, carData]);
 
   const togglePlay = () => setIsPlaying(!isPlaying);
 
@@ -291,7 +295,6 @@ function App() {
                 baseLocationData={locationData} 
                 allLocations={allLocations}
                 drivers={drivers}
-                currentDate={carData[currentTimeIndex]?.date}
                 smoothTimeMs={smoothTimeMs}
                 laps={laps}
               />
