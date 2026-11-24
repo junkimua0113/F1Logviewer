@@ -109,7 +109,8 @@ function App() {
 
         const results = await Promise.all(promises);
         const car = results[0];
-        const loc = fetchLocation ? results[1] : allLocations[selectedDriver as number];
+        const rawLoc = fetchLocation ? results[1] : allLocations[selectedDriver as number];
+        const loc = rawLoc ? rawLoc.filter((p: LocationData) => p.x !== 0 || p.y !== 0) : [];
         
         if (!car || car.length === 0) {
           setErrorMsg('No telemetry data available for this session yet. It might be a future race or data is incomplete.');
@@ -134,7 +135,8 @@ function App() {
               // 1000ms delay to be very safe against 429 Too Many Requests
               await new Promise(resolve => setTimeout(resolve, 1000));
               
-              const dLoc = await getLocationData(selectedSession as number, d.driver_number);
+              const rawDLoc = await getLocationData(selectedSession as number, d.driver_number);
+              const dLoc = rawDLoc.filter((p: LocationData) => p.x !== 0 || p.y !== 0);
               setAllLocations(prev => ({ ...prev, [d.driver_number]: dLoc }));
             } catch (e) {
               console.error(`Failed to load location for driver ${d.driver_number}`);

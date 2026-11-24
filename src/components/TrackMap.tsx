@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useMemo } from 'react';
+import React, { useRef, useEffect, useMemo, useState } from 'react';
 import type { LocationData, Driver, LapData } from '../api/openf1';
 
 interface TrackMapProps {
@@ -10,7 +10,30 @@ interface TrackMapProps {
 }
 
 export const TrackMap: React.FC<TrackMapProps> = ({ baseLocationData, allLocations, drivers, smoothTimeMs, laps }) => {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const trackCanvasRef = useRef<HTMLCanvasElement>(null);
+  const carsCanvasRef = useRef<HTMLCanvasElement>(null);
+  
+  const [dimensions, setDimensions] = useState({ width: 0, height: 0, dpr: 1 });
+
+  // Handle Resize
+  useEffect(() => {
+    const updateSize = () => {
+      if (containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        setDimensions({
+          width: rect.width,
+          height: rect.height,
+          dpr: window.devicePixelRatio || 1
+        });
+      }
+    };
+    
+    window.addEventListener('resize', updateSize);
+    updateSize();
+    
+    return () => window.removeEventListener('resize', updateSize);
+  }, []);
 
   // Find the best valid lap across ALL drivers to draw the track map
   const { referenceLap, trackLocationData } = useMemo(() => {
@@ -82,41 +105,41 @@ export const TrackMap: React.FC<TrackMapProps> = ({ baseLocationData, allLocatio
     return { minX, maxX, minY, maxY, width: maxX - minX, height: maxY - minY };
   }, [trackLocationData]);
 
+  // Transform coordinates mapper
+  const getMapCoords = useMemo(() => {
+    if (!bounds || dimensions.width === 0) return null;
+    const padding = 40;
+    const cw = dimensions.width - padding * 2;
+    const ch = dimensions.height - padding * 2;
+    
+    const scale = Math.min(cw / bounds.width, ch / bounds.height);
+    const offsetX = padding + (cw - bounds.width * scale) / 2;
+    const offsetY = padding + (ch - bounds.height * scale) / 2;
+
+    return {
+      mapX: (x: number) => offsetX + (x - bounds.minX) * scale,
+      mapY: (y: number) => offsetY + (bounds.height - (y - bounds.minY)) * scale
+    };
+  }, [bounds, dimensions]);
+
+  // Layer 1: Draw Track (runs only when track data or bounds change)
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !bounds || trackLocationData.length === 0) return;
+    const canvas = trackCanvasRef.current;
+    if (!canvas || !bounds || !getMapCoords || trackLocationData.length === 0) return;
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Handle high DPI displays
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    
+    const { width, height, dpr } = dimensions;
+    if (width === 0) return;
+
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
     ctx.scale(dpr, dpr);
-    
-    // Setup transform to fit track into canvas
-    const padding = 40;
-    const cw = rect.width - padding * 2;
-    const ch = rect.height - padding * 2;
-    
-    const scale = Math.min(cw / bounds.width, ch / bounds.height);
-    
-    const offsetX = padding + (cw - bounds.width * scale) / 2;
-    const offsetY = padding + (ch - bounds.height * scale) / 2;
+    ctx.clearRect(0, 0, width, height);
 
-    const mapX = (x: number) => offsetX + (x - bounds.minX) * scale;
-    // Y axis needs to be flipped for correct orientation in most F1 tracks
-    const mapY = (y: number) => offsetY + (bounds.height - (y - bounds.minY)) * scale;
+    const { mapX, mapY } = getMapCoords;
 
-    // Clear canvas
-    ctx.clearRect(0, 0, rect.width, rect.height);
-
-    // We want to extract exactly one lap's worth of location data to draw the track,
-    // and color it by sectors if referenceLap is available.
     let trackPoints = trackLocationData;
     let s1_end = 0;
     let s2_end = 0;
@@ -203,7 +226,6 @@ export const TrackMap: React.FC<TrackMapProps> = ({ baseLocationData, allLocatio
         }
       }
       
-      // Neon colors for sectors
       drawSegment(s1_pts, '#ff2a2a'); // Sector 1: Red
       drawSegment(s2_pts, '#2a8cff'); // Sector 2: Blue
       drawSegment(s3_pts, '#ffea00'); // Sector 3: Yellow
@@ -213,46 +235,63 @@ export const TrackMap: React.FC<TrackMapProps> = ({ baseLocationData, allLocatio
       const sampled = trackLocationData.filter((_, i) => i % trackSampleRate === 0);
       drawSegment(sampled, '#2a2f3a');
     }
+  }, [trackLocationData, bounds, dimensions, getMapCoords, referenceLap]);
 
-    // Draw current position for all drivers
-    const targetTime = smoothTimeMs !== undefined ? smoothTimeMs : null;
-    
-    if (targetTime !== null && drivers) {
-      drivers.forEach(driver => {
-        const locs = allLocations[driver.driver_number];
-        if (!locs || locs.length === 0) return;
 
-        const currentLoc = getInterpolatedLocation(locs, targetTime);
-        if (!currentLoc) return;
+  // Layer 2: Draw Cars (runs every frame during animation)
+  useEffect(() => {
+    const canvas = carsCanvasRef.current;
+    if (!canvas || !getMapCoords || smoothTimeMs === undefined) return;
 
-        const cx = mapX(currentLoc.x);
-        const cy = mapY(currentLoc.y);
-        const dColor = `#${driver.team_colour || 'e10600'}`;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
-        // Draw dot
-        ctx.beginPath();
-        ctx.arc(cx, cy, 6, 0, Math.PI * 2);
-        ctx.fillStyle = dColor;
-        ctx.fill();
-        ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 1;
-        ctx.stroke();
+    const { width, height, dpr } = dimensions;
+    if (width === 0) return;
 
-        // Draw Acronym text
-        ctx.fillStyle = '#fff';
-        ctx.font = '10px monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(driver.name_acronym, cx, cy - 10);
-      });
-    }
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, width, height);
 
-  }, [trackLocationData, allLocations, drivers, smoothTimeMs, bounds, referenceLap]);
+    const { mapX, mapY } = getMapCoords;
+    const targetTime = smoothTimeMs;
+
+    drivers.forEach(driver => {
+      const locs = allLocations[driver.driver_number];
+      if (!locs || locs.length === 0) return;
+
+      const currentLoc = getInterpolatedLocation(locs, targetTime);
+      if (!currentLoc) return;
+
+      const cx = mapX(currentLoc.x);
+      const cy = mapY(currentLoc.y);
+      const dColor = `#${driver.team_colour || 'e10600'}`;
+
+      ctx.beginPath();
+      ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+      ctx.fillStyle = dColor;
+      ctx.fill();
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      ctx.fillStyle = '#fff';
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(driver.name_acronym, cx, cy - 10);
+    });
+  }, [allLocations, drivers, smoothTimeMs, dimensions, getMapCoords]);
 
   return (
-    <div className="canvas-container">
+    <div className="canvas-container" ref={containerRef} style={{ position: 'relative' }}>
       <canvas 
-        ref={canvasRef} 
-        style={{ width: '100%', height: '100%', display: 'block' }} 
+        ref={trackCanvasRef} 
+        style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', display: 'block' }} 
+      />
+      <canvas 
+        ref={carsCanvasRef} 
+        style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', display: 'block' }} 
       />
     </div>
   );
@@ -297,14 +336,8 @@ function getInterpolatedLocation(locations: LocationData[], targetTime: number):
   
   if (timeAfter === timeBefore) return { x: tBefore.x, y: tBefore.y };
   
-  // Prevent cars from slowly floating across the map during large data drops (e.g. >1 second)
-  if (timeAfter - timeBefore > 1000) {
-    const leftDiff = Math.abs(timeBefore - targetTime);
-    const rightDiff = Math.abs(timeAfter - targetTime);
-    const closest = leftDiff < rightDiff ? tBefore : tAfter;
-    return { x: closest.x, y: closest.y };
-  }
-  
+  // Notice: We completely removed the logic that snaps the car to a freeze point when the data gap is > 1000ms.
+  // This ensures the car smoothly floats (interpolates) across the gap, preserving the visual flow instead of jumping/teleporting.
   const ratio = (targetTime - timeBefore) / (timeAfter - timeBefore);
   
   const interpX = tBefore.x + (tAfter.x - tBefore.x) * ratio;
@@ -312,4 +345,3 @@ function getInterpolatedLocation(locations: LocationData[], targetTime: number):
   
   return { x: interpX, y: interpY };
 }
-
