@@ -23,6 +23,7 @@ function App() {
   const [laps, setLaps] = useState<LapData[]>([])
   
   const [isLoading, setIsLoading] = useState(false)
+  const [loadingCarsProgress, setLoadingCarsProgress] = useState<{ loaded: number, total: number }>({ loaded: 0, total: 0 })
   const [errorMsg, setErrorMsg] = useState<string>('')
   const [currentTimeIndex, setCurrentTimeIndex] = useState(0)
   
@@ -36,13 +37,11 @@ function App() {
       try {
         setErrorMsg('');
         const data = await getSessions(selectedYear);
-        // Sort sessions by date descending
         const sorted = data.sort((a, b) => new Date(b.date_start).getTime() - new Date(a.date_start).getTime());
         setSessions(sorted);
         
         if (sorted.length > 0) {
           const now = new Date().getTime();
-          // Find the most recent session that has already started, or just the first one if all are future
           const pastSession = sorted.find(s => new Date(s.date_start).getTime() < now);
           setSelectedSession(pastSession ? pastSession.session_key : sorted[0].session_key);
         } else {
@@ -53,9 +52,9 @@ function App() {
           setAllLocations({});
           setLaps([]);
         }
-      } catch (err) {
+      } catch (err: any) {
         console.error("Failed to load sessions", err);
-        setErrorMsg('Failed to load sessions for this year.');
+        setErrorMsg(err.message || 'Failed to load sessions for this year.');
       }
     }
     loadSessions();
@@ -66,7 +65,8 @@ function App() {
     if (!selectedSession) return;
     
     async function loadSessionData() {
-      setAllLocations({}); // Clear previous session's location cache
+      setAllLocations({});
+      setLoadingCarsProgress({ loaded: 0, total: 0 });
       try {
         const [driversData, lapsData] = await Promise.all([
           getDrivers(selectedSession as number),
@@ -79,24 +79,30 @@ function App() {
         if (driversData.length > 0) {
           setSelectedDriver(driversData[0].driver_number);
         }
-      } catch (err) {
+      } catch (err: any) {
         console.error("Failed to load session data", err);
-        setErrorMsg('Failed to load drivers or laps. API rate limit may be hit.');
+        setErrorMsg(err.message || 'Failed to load drivers or laps.');
       }
     }
     loadSessionData();
   }, [selectedSession]);
 
+  // Track cancellation of background driver loading
+  const loadAbortRef = useRef<boolean>(false);
+
   // Fetch telemetry when driver changes
   useEffect(() => {
     if (!selectedSession || !selectedDriver) return;
+
+    loadAbortRef.current = true; // Cancel previous loading queue
+    const currentAbort = false;
+    loadAbortRef.current = currentAbort;
 
     async function loadTelemetry() {
       setIsLoading(true);
       setErrorMsg('');
       setCurrentTimeIndex(0);
       try {
-        // Only fetch if we don't already have the location data for this driver
         const fetchLocation = !allLocations[selectedDriver as number];
         
         const promises: Promise<any>[] = [
@@ -124,33 +130,68 @@ function App() {
           setAllLocations(prev => ({ ...prev, [selectedDriver as number]: loc }));
         }
 
-        // Background load other drivers if not already loaded
+        // Auto seek to race start (Lap 1) if present, to avoid 1 hour grid-standing time (e.g. Brazil)
+        let initialIdx = 0;
+        const lap1 = laps.find(l => l.driver_number === selectedDriver && l.lap_number === 1);
+        if (lap1 && lap1.date_start) {
+          const lap1Time = new Date(lap1.date_start).getTime();
+          // Find carData point closest to or just before lap1 start
+          const idx = car.findIndex((c: CarData) => new Date(c.date).getTime() >= lap1Time);
+          if (idx !== -1) {
+            initialIdx = Math.max(0, idx - 50); // Seek ~15 seconds before green flag
+          }
+        }
+        setCurrentTimeIndex(initialIdx);
+        if (car[initialIdx]) {
+          setSmoothTimeMs(new Date(car[initialIdx].date).getTime());
+        }
+
+        // Fast parallel batch load other drivers
         const otherDrivers = drivers.filter(d => d.driver_number !== selectedDriver);
+        setLoadingCarsProgress({ loaded: 1, total: drivers.length });
+
+        // Process in concurrent batches of 3
+        const batchSize = 3;
         (async () => {
-          for (const d of otherDrivers) {
-            // Skip if already loaded
-            if (allLocations[d.driver_number]) continue;
+          let count = 1;
+          for (let i = 0; i < otherDrivers.length; i += batchSize) {
+            if (loadAbortRef.current) break;
+            const batch = otherDrivers.slice(i, i + batchSize);
             
-            try {
-              // 1000ms delay to be very safe against 429 Too Many Requests
-              await new Promise(resolve => setTimeout(resolve, 1000));
-              
-              const rawDLoc = await getLocationData(selectedSession as number, d.driver_number);
-              const dLoc = rawDLoc.filter((p: LocationData) => p.x !== 0 || p.y !== 0);
-              setAllLocations(prev => ({ ...prev, [d.driver_number]: dLoc }));
-            } catch (e) {
-              console.error(`Failed to load location for driver ${d.driver_number}`);
-            }
+            await Promise.all(batch.map(async (d) => {
+              if (loadAbortRef.current) return;
+              if (allLocations[d.driver_number]) {
+                count++;
+                return;
+              }
+              try {
+                const rawDLoc = await getLocationData(selectedSession as number, d.driver_number);
+                if (loadAbortRef.current) return;
+                const dLoc = rawDLoc.filter((p: LocationData) => p.x !== 0 || p.y !== 0);
+                setAllLocations(prev => ({ ...prev, [d.driver_number]: dLoc }));
+              } catch (e) {
+                console.error(`Failed to load location for driver ${d.driver_number}`, e);
+              }
+              count++;
+              setLoadingCarsProgress({ loaded: count, total: drivers.length });
+            }));
+
+            // Small delay between batches to stay safely within API rate limits
+            await new Promise(resolve => setTimeout(resolve, 350));
           }
         })();
-      } catch (err) {
+      } catch (err: any) {
         console.error("Failed to load telemetry", err);
-        setErrorMsg('Failed to fetch data from OpenF1 API. The race might be in the future or the API rate limit was hit.');
+        setErrorMsg(err.message || 'Failed to fetch data from OpenF1 API.');
       } finally {
         setIsLoading(false);
       }
     }
     loadTelemetry();
+
+    return () => {
+      loadAbortRef.current = true;
+    };
   }, [selectedSession, selectedDriver]);
 
   const currentDriver = drivers.find(d => d.driver_number === selectedDriver);
@@ -161,6 +202,22 @@ function App() {
     setCurrentTimeIndex(newIdx);
     if (!isPlaying && carData[newIdx]) {
       setSmoothTimeMs(new Date(carData[newIdx].date).getTime());
+    }
+  };
+
+  // Jump directly to Lap 1 green flag start
+  const jumpToRaceStart = () => {
+    const lap1 = laps.find(l => l.driver_number === selectedDriver && l.lap_number === 1);
+    if (lap1 && lap1.date_start && carData.length > 0) {
+      const lap1Time = new Date(lap1.date_start).getTime();
+      const idx = carData.findIndex((c: CarData) => new Date(c.date).getTime() >= lap1Time);
+      if (idx !== -1) {
+        const targetIdx = Math.max(0, idx - 30);
+        setCurrentTimeIndex(targetIdx);
+        if (carData[targetIdx]) {
+          setSmoothTimeMs(new Date(carData[targetIdx].date).getTime());
+        }
+      }
     }
   };
 
@@ -263,6 +320,33 @@ function App() {
               <div className="driver-name">{currentDriver.name_acronym}</div>
             </div>
           )}
+
+          {/* Cars Tracking Status Indicator */}
+          {drivers.length > 0 && (
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              backgroundColor: 'var(--bg-tertiary)',
+              padding: '0.4rem 0.8rem',
+              borderRadius: '8px',
+              fontSize: '0.75rem',
+              fontWeight: 600,
+              color: loadingCarsProgress.loaded >= drivers.length ? '#00ff88' : '#ffb700'
+            }}>
+              <span style={{
+                width: 8,
+                height: 8,
+                borderRadius: '50%',
+                backgroundColor: loadingCarsProgress.loaded >= drivers.length ? '#00ff88' : '#ffb700',
+                display: 'inline-block'
+              }} />
+              {loadingCarsProgress.loaded >= drivers.length 
+                ? `ALL CARS READY (${drivers.length}/${drivers.length})`
+                : `SYNCING CARS (${loadingCarsProgress.loaded}/${drivers.length})`
+              }
+            </div>
+          )}
         </div>
       </header>
 
@@ -277,15 +361,20 @@ function App() {
 
         {errorMsg && !isLoading && (
           <div className="error-overlay">
-            <h2>Oops!</h2>
-            <p>{errorMsg}</p>
+            <h2>Notice</h2>
+            <p style={{ maxWidth: '600px', lineHeight: 1.6 }}>{errorMsg}</p>
           </div>
         )}
         
         <PanelGroup orientation="horizontal" className="panel-group">
           <Panel defaultSize={25} minSize={15}>
             <div className="leaderboard-panel">
-              <Leaderboard laps={laps} drivers={drivers} currentDate={carData[currentTimeIndex]?.date} />
+              <Leaderboard 
+                laps={laps} 
+                drivers={drivers} 
+                currentDate={carData[currentTimeIndex]?.date}
+                allLocations={allLocations}
+              />
             </div>
           </Panel>
           
@@ -352,6 +441,24 @@ function App() {
         >
           {isPlaying ? '⏸ Pause' : '▶ Play'}
         </button>
+
+        <button 
+          onClick={jumpToRaceStart}
+          disabled={isLoading || carData.length === 0}
+          style={{
+            backgroundColor: 'var(--bg-tertiary)',
+            color: 'var(--text-primary)',
+            padding: '0.5rem 0.8rem',
+            borderRadius: '6px',
+            fontSize: '0.8rem',
+            fontWeight: 600,
+            whiteSpace: 'nowrap'
+          }}
+          title="Jump directly to Race Start (Lap 1)"
+        >
+          🏁 Start
+        </button>
+
         <select 
           value={playbackSpeed} 
           onChange={e => setPlaybackSpeed(Number(e.target.value))}
@@ -384,7 +491,12 @@ function App() {
             disabled={isLoading || carData.length === 0}
           />
         </div>
-        <span>{carData.length} points</span>
+        <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', minWidth: '130px', textAlign: 'right' }}>
+          {carData[currentTimeIndex] 
+            ? new Date(carData[currentTimeIndex].date).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) 
+            : `${carData.length} pts`
+          }
+        </span>
       </div>
     </div>
   )

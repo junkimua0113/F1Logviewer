@@ -52,6 +52,8 @@ export const TrackMap: React.FC<TrackMapProps> = ({ baseLocationData, allLocatio
       if (!locs || locs.length < 100) continue;
       
       const driverLaps = laps.filter(l => l.driver_number === driver.driver_number);
+      
+      // Look for laps with sector times first
       const validLaps = driverLaps.filter(l => 
         !l.is_pit_out_lap && 
         l.duration_sector_1 && 
@@ -63,12 +65,24 @@ export const TrackMap: React.FC<TrackMapProps> = ({ baseLocationData, allLocatio
       );
       
       if (validLaps.length > 0) {
-        // Find the fastest lap for this driver
         validLaps.sort((a, b) => (a.lap_duration || 9999) - (b.lap_duration || 9999));
         const candidateLap = validLaps[0];
         
         if (!bestLap || (candidateLap.lap_duration || 9999) < (bestLap.lap_duration || 9999)) {
           bestLap = candidateLap;
+          bestLocs = locs;
+        }
+      } else if (!bestLap) {
+        // Fallback: any lap with valid duration
+        const fallbackLaps = driverLaps.filter(l => 
+          !l.is_pit_out_lap && 
+          l.lap_duration && 
+          l.lap_duration > 50 && 
+          l.lap_duration < 200
+        ).sort((a, b) => (a.lap_duration || 9999) - (b.lap_duration || 9999));
+
+        if (fallbackLaps.length > 0) {
+          bestLap = fallbackLaps[0];
           bestLocs = locs;
         }
       }
@@ -86,6 +100,7 @@ export const TrackMap: React.FC<TrackMapProps> = ({ baseLocationData, allLocatio
       return { circuitPoints: [], s1_end: 0, s2_end: 0, s3_end: 0, hasSectors: false };
     }
 
+    // Try extracting via referenceLap with sectors
     if (referenceLap && referenceLap.duration_sector_1 && referenceLap.duration_sector_2 && referenceLap.duration_sector_3) {
       const startTime = new Date(referenceLap.date_start).getTime();
       const s1 = startTime + referenceLap.duration_sector_1 * 1000;
@@ -109,10 +124,36 @@ export const TrackMap: React.FC<TrackMapProps> = ({ baseLocationData, allLocatio
       }
     }
 
-    // Fallback: use all non-zero points if no single reference lap is found
-    const filtered = trackLocationData.filter(p => p.x !== 0 || p.y !== 0);
+    // Fallback: extract single lap duration without sectors
+    if (referenceLap && referenceLap.lap_duration && referenceLap.date_start) {
+      const startTime = new Date(referenceLap.date_start).getTime();
+      const endTime = startTime + referenceLap.lap_duration * 1000;
+
+      const pts = trackLocationData.filter(p => {
+        if (p.x === 0 && p.y === 0) return false;
+        const t = new Date(p.date).getTime();
+        return t >= startTime && t <= endTime + 1000;
+      });
+
+      if (pts.length > 50) {
+        return {
+          circuitPoints: pts,
+          s1_end: 0,
+          s2_end: 0,
+          s3_end: 0,
+          hasSectors: false
+        };
+      }
+    }
+
+    // Secondary Fallback: take a clean slice of ~600 continuous moving points (never draw all 40,000 points!)
+    const cleanPoints = trackLocationData.filter(p => p.x !== 0 || p.y !== 0);
+    const sliceCount = Math.min(600, cleanPoints.length);
+    const startIdx = Math.floor(cleanPoints.length * 0.3); // Mid-session points are cleanest
+    const sliced = cleanPoints.slice(startIdx, startIdx + sliceCount);
+
     return {
-      circuitPoints: filtered,
+      circuitPoints: sliced.length > 50 ? sliced : cleanPoints.slice(0, 500),
       s1_end: 0,
       s2_end: 0,
       s3_end: 0,
@@ -253,9 +294,7 @@ export const TrackMap: React.FC<TrackMapProps> = ({ baseLocationData, allLocatio
       drawSegment(s2_pts, '#2a8cff'); // Sector 2: Blue
       drawSegment(s3_pts, '#ffea00'); // Sector 3: Yellow
     } else {
-      const trackSampleRate = Math.max(1, Math.floor(circuitPoints.length / 1000));
-      const sampled = circuitPoints.filter((_, i) => i % trackSampleRate === 0);
-      drawSegment(sampled, '#00d2ff');
+      drawSegment(circuitPoints, '#00d2ff'); // Single clean lap fallback in bright cyan
     }
   }, [circuitPoints, bounds, dimensions, getMapCoords, hasSectors, s1_end, s2_end, s3_end]);
 
@@ -282,12 +321,17 @@ export const TrackMap: React.FC<TrackMapProps> = ({ baseLocationData, allLocatio
       const locs = allLocations[driver.driver_number];
       if (!locs || locs.length === 0) return;
 
-      const currentLoc = getInterpolatedLocation(locs, targetTime);
-      if (!currentLoc) return;
+      const locResult = getInterpolatedLocation(locs, targetTime);
+      if (!locResult) return;
 
-      const cx = mapX(currentLoc.x);
-      const cy = mapY(currentLoc.y);
+      const cx = mapX(locResult.x);
+      const cy = mapY(locResult.y);
       const dColor = `#${driver.team_colour || 'e10600'}`;
+
+      ctx.save();
+      if (locResult.isInactive) {
+        ctx.globalAlpha = 0.3; // Dim out cars that are not currently running
+      }
 
       ctx.beginPath();
       ctx.arc(cx, cy, 6, 0, Math.PI * 2);
@@ -301,6 +345,8 @@ export const TrackMap: React.FC<TrackMapProps> = ({ baseLocationData, allLocatio
       ctx.font = 'bold 11px monospace';
       ctx.textAlign = 'center';
       ctx.fillText(driver.name_acronym, cx, cy - 10);
+
+      ctx.restore();
     });
   }, [allLocations, drivers, smoothTimeMs, dimensions, getMapCoords]);
 
@@ -405,7 +451,7 @@ export const TrackMap: React.FC<TrackMapProps> = ({ baseLocationData, allLocatio
 };
 
 // Helper function to interpolate location between two data points for smooth animation
-function getInterpolatedLocation(locations: LocationData[], targetTime: number): { x: number, y: number } | null {
+function getInterpolatedLocation(locations: LocationData[], targetTime: number): { x: number, y: number, isInactive?: boolean } | null {
   if (!locations || locations.length === 0) return null;
   
   let left = 0;
@@ -414,8 +460,13 @@ function getInterpolatedLocation(locations: LocationData[], targetTime: number):
   const firstTime = new Date(locations[0].date).getTime();
   const lastTime = new Date(locations[right].date).getTime();
   
-  if (targetTime <= firstTime) return { x: locations[0].x, y: locations[0].y };
-  if (targetTime >= lastTime) return { x: locations[right].x, y: locations[right].y };
+  // Outside valid driving window
+  if (targetTime < firstTime) {
+    return { x: locations[0].x, y: locations[0].y, isInactive: true };
+  }
+  if (targetTime > lastTime) {
+    return { x: locations[right].x, y: locations[right].y, isInactive: true };
+  }
 
   while (left <= right) {
     const mid = Math.floor((left + right) / 2);
@@ -441,6 +492,14 @@ function getInterpolatedLocation(locations: LocationData[], targetTime: number):
   const timeAfter = new Date(tAfter.date).getTime();
   
   if (timeAfter === timeBefore) return { x: tBefore.x, y: tBefore.y };
+  
+  // Data drop protection: if gap > 2500ms, don't float across infield, hold at last known position
+  if (timeAfter - timeBefore > 2500) {
+    const leftDiff = Math.abs(timeBefore - targetTime);
+    const rightDiff = Math.abs(timeAfter - targetTime);
+    const closest = leftDiff < rightDiff ? tBefore : tAfter;
+    return { x: closest.x, y: closest.y };
+  }
   
   const ratio = (targetTime - timeBefore) / (timeAfter - timeBefore);
   

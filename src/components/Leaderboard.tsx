@@ -1,13 +1,14 @@
 import React, { useMemo } from 'react';
-import type { LapData, Driver } from '../api/openf1';
+import type { LapData, Driver, LocationData } from '../api/openf1';
 
 interface LeaderboardProps {
   laps: LapData[];
   drivers: Driver[];
   currentDate: string | undefined;
+  allLocations?: Record<number, LocationData[]>;
 }
 
-export const Leaderboard: React.FC<LeaderboardProps> = ({ laps, drivers, currentDate }) => {
+export const Leaderboard: React.FC<LeaderboardProps> = ({ laps, drivers, currentDate, allLocations = {} }) => {
   const currentLaps = useMemo(() => {
     if (!laps || laps.length === 0 || !currentDate || !drivers) return [];
     
@@ -44,7 +45,8 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({ laps, drivers, current
       return {
         driver,
         lap: activeLap,
-        bestLapTime
+        bestLapTime,
+        isLoaded: Boolean(allLocations[driver.driver_number] && allLocations[driver.driver_number].length > 0)
       };
     });
     
@@ -56,7 +58,7 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({ laps, drivers, current
     });
     
     return results;
-  }, [laps, drivers, currentDate]);
+  }, [laps, drivers, currentDate, allLocations]);
 
   return (
     <div className="leaderboard-container">
@@ -73,7 +75,19 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({ laps, drivers, current
           <div key={item.driver.driver_number} className="leaderboard-row">
             <div className="lb-driver">
               <span className="lb-color" style={{ backgroundColor: `#${item.driver.team_colour || 'e10600'}` }}></span>
-              {item.driver.name_acronym}
+              <span>{item.driver.name_acronym}</span>
+              <span 
+                title={item.isLoaded ? "GPS Data Synced" : "Loading GPS Data..."}
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: '50%',
+                  backgroundColor: item.isLoaded ? '#00ff88' : '#ffb700',
+                  opacity: item.isLoaded ? 0.9 : 0.5,
+                  display: 'inline-block',
+                  marginLeft: 4
+                }}
+              />
             </div>
             <div className="lb-lap">{item.lap ? item.lap.lap_number : '-'}</div>
             <div className="lb-time">{formatTime(item.lap?.duration_sector_1)}</div>

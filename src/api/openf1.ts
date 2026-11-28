@@ -3,9 +3,16 @@ export interface Session {
   session_name: string;
   date_start: string;
   date_end: string;
-  year: number;
-  circuit_short_name: string;
+  gmt_offset: string;
+  session_type: string;
+  meeting_key: number;
+  location: string;
+  country_key: number;
+  country_code: string;
   country_name: string;
+  circuit_key: number;
+  circuit_short_name: string;
+  year: number;
 }
 
 export interface Driver {
@@ -15,11 +22,17 @@ export interface Driver {
   name_acronym: string;
   team_name: string;
   team_colour: string;
+  first_name: string;
+  last_name: string;
   headshot_url: string;
+  country_code: string;
+  session_key: number;
+  meeting_key: number;
 }
 
 export interface CarData {
   date: string;
+  driver_number: number;
   rpm: number;
   speed: number;
   n_gear: number;
@@ -28,7 +41,6 @@ export interface CarData {
   drs: number;
   session_key: number;
   meeting_key: number;
-  driver_number: number;
 }
 
 export interface LocationData {
@@ -74,36 +86,41 @@ async function fetchWithRetry(url: string, maxRetries = 4): Promise<Response> {
   throw new Error(`Failed to fetch after ${maxRetries} retries: 429 Too Many Requests`);
 }
 
+async function fetchJsonArray<T>(url: string): Promise<T[]> {
+  const response = await fetchWithRetry(url);
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`API error (${response.status}): ${errText}`);
+  }
+  const data = await response.json();
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    if ('detail' in data) {
+      throw new Error(`OpenF1 Notice: ${data.detail}`);
+    }
+    return [];
+  }
+  return Array.isArray(data) ? data : [];
+}
+
 export async function getSessions(year: number = 2024): Promise<Session[]> {
-  const response = await fetchWithRetry(`${BASE_URL}/sessions?year=${year}`);
-  if (!response.ok) throw new Error('Failed to fetch sessions');
-  return response.json();
+  return fetchJsonArray<Session>(`${BASE_URL}/sessions?year=${year}`);
 }
 
 export async function getDrivers(sessionKey: number): Promise<Driver[]> {
-  const response = await fetchWithRetry(`${BASE_URL}/drivers?session_key=${sessionKey}`);
-  if (!response.ok) throw new Error('Failed to fetch drivers');
-  return response.json();
+  return fetchJsonArray<Driver>(`${BASE_URL}/drivers?session_key=${sessionKey}`);
 }
 
 export async function getCarData(sessionKey: number, driverNumber: number): Promise<CarData[]> {
-  // To avoid fetching too much data, we can limit it or just fetch a specific timeframe if needed.
-  const response = await fetchWithRetry(`${BASE_URL}/car_data?session_key=${sessionKey}&driver_number=${driverNumber}`);
-  if (!response.ok) throw new Error('Failed to fetch car data');
-  return response.json();
+  return fetchJsonArray<CarData>(`${BASE_URL}/car_data?session_key=${sessionKey}&driver_number=${driverNumber}`);
 }
 
 export async function getLocationData(sessionKey: number, driverNumber: number): Promise<LocationData[]> {
-  const response = await fetchWithRetry(`${BASE_URL}/location?session_key=${sessionKey}&driver_number=${driverNumber}`);
-  if (!response.ok) throw new Error('Failed to fetch location data');
-  return response.json();
+  return fetchJsonArray<LocationData>(`${BASE_URL}/location?session_key=${sessionKey}&driver_number=${driverNumber}`);
 }
 
 export async function getLaps(sessionKey: number, driverNumber?: number): Promise<LapData[]> {
   const url = driverNumber 
     ? `${BASE_URL}/laps?session_key=${sessionKey}&driver_number=${driverNumber}`
     : `${BASE_URL}/laps?session_key=${sessionKey}`;
-  const response = await fetchWithRetry(url);
-  if (!response.ok) throw new Error('Failed to fetch lap data');
-  return response.json();
+  return fetchJsonArray<LapData>(url);
 }
